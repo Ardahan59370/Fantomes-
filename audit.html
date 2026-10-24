@@ -1,1 +1,215 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Ton audit — Fantômes</title>
+<style>
+  :root{--encre:#1b1b1b;--creme:#f6f1e7;--accent:#d9480f;--gris:#5c5c5c}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--creme);color:var(--encre);font-family:-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;padding-bottom:90px}
+  main{max-width:560px;margin:0 auto;padding:28px 20px}
+  h1{font-family:Georgia,serif;font-size:2.1rem;margin:0 0 8px}
+  h2{font-family:Georgia,serif;font-size:1.4rem;margin:28px 0 8px}
+  .lead{color:var(--gris);margin:0 0 20px}
+  textarea,input[type=text],input[type=file]{width:100%;font-size:16px;padding:12px;border:1.5px solid #cfc6b2;border-radius:10px;background:#fff;font-family:inherit}
+  textarea{min-height:110px}
+  button{font-size:1rem;font-family:inherit;cursor:pointer}
+  #go{display:block;width:100%;background:var(--accent);color:#fff;border:0;font-weight:700;padding:16px;border-radius:14px;margin-top:14px;font-size:1.1rem}
+  .err{color:#b00020;font-weight:600;margin:10px 0 0}
+  .petit{font-size:.9rem;color:var(--gris)}
+  .carte{background:#fff;border:1.5px solid var(--encre);border-radius:14px;padding:16px;margin:12px 0}
+  .haut{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+  .haut strong{display:block;font-size:1.1rem}
+  .haut span{color:var(--gris);font-size:.95rem}
+  .an{text-align:right;font-family:Georgia,serif;font-size:1.4rem;color:var(--accent);font-weight:700}
+  .an small{display:block;font-family:-apple-system,sans-serif;font-size:.75rem;color:var(--gris);font-weight:400}
+  label{display:block;margin:12px 0 8px}
+  .lettre,.copie{background:var(--creme);border:1.5px solid var(--encre);border-radius:10px;padding:10px 14px;font-weight:600}
+  .zone{margin-top:10px}
+  .zone textarea{min-height:260px;margin-bottom:8px;font-size:15px}
+  .barre{position:fixed;left:0;right:0;bottom:0;background:var(--encre);color:#fff;padding:14px 20px calc(14px + env(safe-area-inset-bottom));text-align:center;font-size:1.05rem}
+  .barre strong{font-family:Georgia,serif;font-size:1.4rem;color:#ffb68a}
+</style>
+</head>
+<body>
+<main>
+  <h1>Ton audit</h1>
+  <p class="lead">Dépose ton relevé bancaire au format CSV (ton espace bancaire en ligne permet de l’exporter). Il reste sur ton téléphone : rien n’est envoyé.</p>
 
+  <input type="file" id="f" accept=".csv,.txt,text/csv,text/plain">
+  <p class="petit">ou colle ici le contenu du relevé :</p>
+  <textarea id="t" placeholder="date;libellé;montant"></textarea>
+  <button id="go">Chercher mes fantômes</button>
+  <p id="err" class="err"></p>
+
+  <section id="res" hidden>
+    <h2>Tes abonnements, du plus coûteux au moins coûteux</h2>
+    <p class="petit">Tu paies <strong id="tot"></strong> par an en prélèvements réguliers détectés. Si ton relevé affiche les dépenses en positif, vérifie la liste : un salaire pourrait y figurer.</p>
+    <h2>Pour tes lettres</h2>
+    <input type="text" id="nom" placeholder="Ton prénom et ton nom" style="margin-bottom:8px">
+    <input type="text" id="adr" placeholder="Ton adresse postale">
+    <div id="list"></div>
+  </section>
+</main>
+<div class="barre" id="barre" hidden>Économisé sur l’année : <strong id="eco">0,00 €</strong></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const eur=n=>n.toLocaleString('fr-FR',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
+const STOP=new Set(['PRLV','PRELEVEMENT','SEPA','CARTE','PAIEMENT','VIR','VIREMENT','FACTURE','ABONNEMENT','ECH','DEBIT','REF','MANDAT','RUM','LES','DES','PAR','POUR','SARL','SAS','FRANCE','PARIS','COMPTE']);
+let items=[];
+
+function parseDate(s){
+  let m=s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if(m)return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/);
+  if(m){let y=+m[3];if(y<100)y+=2000;return new Date(y,+m[2]-1,+m[1]);}
+  return null;
+}
+function num(c){
+  const s=c.replace(/[\s\u00a0€]/g,'');
+  return /^[-+]?\d+[.,]\d{1,2}$/.test(s)?parseFloat(s.replace(',','.')):null;
+}
+function split(line,d){
+  const out=[];let cur='',q=false;
+  for(let i=0;i<line.length;i++){
+    const c=line[i];
+    if(c=='"'){if(q&&line[i+1]=='"'){cur+='"';i++}else q=!q}
+    else if(c==d&&!q){out.push(cur);cur=''}
+    else cur+=c;
+  }
+  out.push(cur);
+  return out.map(x=>x.trim());
+}
+function key(l){
+  const t=l.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z\s]/g,' ').split(/\s+/).filter(w=>w.length>2&&!STOP.has(w));
+  return t.slice(0,2).join(' ');
+}
+function titre(k){return k.split(' ').map(w=>w[0]+w.slice(1).toLowerCase()).join(' ')}
+
+function analyse(txt){
+  const lines=txt.split(/\r?\n/).filter(l=>l.trim());
+  const head=lines.slice(0,5).join('\n');
+  const d=head.includes(';')?';':head.includes('\t')?'\t':',';
+  const rows=[];
+  for(const l of lines){
+    const c=split(l,d);
+    let date=null,di=-1;
+    for(let i=0;i<c.length;i++){
+      if(c[i].length<=20){const x=parseDate(c[i]);if(x){date=x;di=i;break}}
+    }
+    if(!date)continue;
+    const am=[];let label='',best=0;
+    c.forEach((x,i)=>{
+      if(i===di)return;
+      const n=num(x);
+      if(n!==null){if(n!==0)am.push(n)}
+      else{const k=(x.match(/[A-Za-zÀ-ÿ]/g)||[]).length;if(k>best){best=k;label=x}}
+    });
+    if(!am.length||!label)continue;
+    rows.push({date,am,label});
+  }
+  const hasNeg=rows.some(r=>r.am.some(v=>v<0));
+  const g={};
+  for(const r of rows){
+    const v=hasNeg?r.am.find(v=>v<0):r.am[0];
+    if(v===undefined)continue;
+    const k=key(r.label);
+    if(!k)continue;
+    (g[k]=g[k]||[]).push({date:r.date,a:Math.abs(v)});
+  }
+  const out=[];
+  for(const [k,arr] of Object.entries(g)){
+    if(arr.length<2)continue;
+    arr.sort((a,b)=>a.date-b.date);
+    const s=arr.map(x=>x.a).sort((a,b)=>a-b);
+    const med=s[Math.floor(s.length/2)];
+    const ok=arr.filter(x=>Math.abs(x.a-med)<=med*0.15);
+    if(ok.length<2)continue;
+    const gaps=[];
+    for(let i=1;i<ok.length;i++)gaps.push((ok[i].date-ok[i-1].date)/864e5);
+    const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;
+    let mult,per;
+    if(avg>=25&&avg<=35){mult=12;per='par mois'}
+    else if(avg>=85&&avg<=95){mult=4;per='par trimestre'}
+    else if(avg>=355&&avg<=375){mult=1;per='par an'}
+    else continue;
+    out.push({name:titre(k),amount:med,per,annual:med*mult});
+  }
+  return out.sort((a,b)=>b.annual-a.annual);
+}
+
+function lettre(it){
+  const nom=$('nom').value.trim()||'[Prénom NOM]';
+  const adr=$('adr').value.trim()||'[Ton adresse]';
+  const jour=new Date().toLocaleDateString('fr-FR');
+  return `${nom}
+${adr}
+
+${it.name}
+Service résiliation
+
+Objet : résiliation de mon abonnement
+Référence du contrat : [numéro client ou e-mail du compte]
+
+Madame, Monsieur,
+
+Par la présente, je vous informe de ma décision de résilier l’abonnement dont je suis titulaire auprès de vos services (prélèvement de ${eur(it.amount)} ${it.per}). Cette résiliation prend effet immédiatement ou, à défaut, à la prochaine échéance contractuelle.
+
+Je vous demande de cesser tout prélèvement à compter de la réception de ce courrier et de m’en confirmer la prise en compte par écrit.
+
+Je vous prie d’agréer, Madame, Monsieur, mes salutations distinguées.
+
+${nom}
+Le ${jour}`;
+}
+
+function majTotal(){
+  let t=0;
+  document.querySelectorAll('.chk:checked').forEach(c=>t+=items[+c.dataset.i].annual);
+  $('eco').textContent=eur(t);
+}
+function render(){
+  $('list').innerHTML=items.map((it,i)=>`<div class="carte"><div class="haut"><div><strong>${esc(it.name)}</strong><span>${eur(it.amount)} ${it.per}</span></div><div class="an">${eur(it.annual)}<small>par an</small></div></div><label><input type="checkbox" class="chk" data-i="${i}"> Je résilie celui-là</label><button class="lettre" data-i="${i}">Voir la lettre de résiliation</button><div class="zone" id="z${i}" hidden><textarea readonly></textarea><button class="copie" data-i="${i}">Copier la lettre</button></div></div>`).join('');
+  majTotal();
+}
+
+$('go').onclick=async()=>{
+  $('err').textContent='';
+  let txt=$('t').value;
+  const f=$('f').files[0];
+  if(f)txt=await f.text();
+  if(!txt.trim()){$('err').textContent='Choisis un fichier ou colle ton relevé ci-dessus.';return}
+  items=analyse(txt);
+  if(!items.length){
+    $('res').hidden=true;$('barre').hidden=true;
+    $('err').textContent='Aucun prélèvement régulier trouvé. Vérifie que ton relevé couvre au moins 2 à 3 mois.';
+    return;
+  }
+  $('tot').textContent=eur(items.reduce((s,x)=>s+x.annual,0));
+  $('res').hidden=false;$('barre').hidden=false;
+  render();
+  $('res').scrollIntoView({behavior:'smooth'});
+};
+document.addEventListener('click',e=>{
+  const b=e.target;
+  if(b.classList.contains('lettre')){
+    const z=$('z'+b.dataset.i);
+    z.hidden=!z.hidden;
+    if(!z.hidden)z.querySelector('textarea').value=lettre(items[+b.dataset.i]);
+  }
+  if(b.classList.contains('copie')){
+    const ta=$('z'+b.dataset.i).querySelector('textarea');
+    ta.value=lettre(items[+b.dataset.i]);
+    ta.select();
+    try{navigator.clipboard.writeText(ta.value)}catch(_){document.execCommand('copy')}
+    b.textContent='Copiée ✓';
+  }
+});
+document.addEventListener('change',e=>{if(e.target.classList.contains('chk'))majTotal()});
+</script>
+</body>
+</html>
